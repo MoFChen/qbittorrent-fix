@@ -1,364 +1,178 @@
-name: Build qBittorrent with latest libtorrent
+name: Build qBittorrent image
 
 on:
   workflow_dispatch:
-    inputs:
-      qbittorrent_tag:
-        description: "qBittorrent tag，留空自动使用 latest stable，例如 release-5.2.3"
-        required: false
-        type: string
-
-      libtorrent_tag:
-        description: "libtorrent tag，留空自动使用 latest stable，例如 v2.1.1"
-        required: false
-        type: string
-
-  # 每周自动检查一次新版本
-  #schedule:
-  #  - cron: "0 0 * * 1"
 
 permissions:
   contents: read
   packages: write
 
 env:
-  # 最终镜像名称：
-  # ghcr.io/<github用户名>/qbittorrent
-  IMAGE_BASENAME: qbittorrent
+  QBT_VERSION: "5.3.0beta1"
+  LIBTORRENT_VERSION: "v2.1.1"
+
+  BOOST_VERSION_MAJOR: "1"
+  BOOST_VERSION_MINOR: "92"
+  BOOST_VERSION_PATCH: "0"
 
 jobs:
   build:
+    name: Build and publish
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ------------------------------------------------------------
-      # 1. 获取 qBittorrent / libtorrent 最新稳定版
-      # ------------------------------------------------------------
-      - name: Resolve latest compatible versions
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QBT_INPUT: ${{ inputs.qbittorrent_tag }}
-          LT_INPUT: ${{ inputs.libtorrent_tag }}
+      - name: Set image variables
         shell: bash
         run: |
           set -euo pipefail
 
-          # ----------------------------------------------------------
-          # qBittorrent
-          #
-          # 注意：
-          # /releases/latest 会忽略 prerelease。
-          #
-          # 目前 libtorrent 2.1.x 需要 qBittorrent 5.3.x，
-          # 而当前最新的是 5.3.0beta1，所以这里直接从 releases
-          # 列表取最新的非 draft release，包括 beta/RC。
-          # ----------------------------------------------------------
-          if [[ -n "${QBT_INPUT:-}" ]]; then
-            QBT_TAG="${QBT_INPUT}"
-          else
-            QBT_TAG="$(
-              curl -fsSL \
-                -H "Authorization: Bearer ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/qbittorrent/qBittorrent/releases?per_page=20" \
-              | jq -r '[.[] | select(.draft == false)][0].tag_name'
-            )"
-          fi
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
 
-          # ----------------------------------------------------------
-          # libtorrent
-          #
-          # libtorrent 这里需要最新正式稳定 release。
-          # 当前为 v2.1.1。
-          # ----------------------------------------------------------
-          if [[ -n "${LT_INPUT:-}" ]]; then
-            LT_TAG="${LT_INPUT}"
-          else
-            LT_TAG="$(
-              curl -fsSL \
-                -H "Authorization: Bearer ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/arvidn/libtorrent/releases/latest" \
-              | jq -r '.tag_name'
-            )"
-          fi
+          echo "IMAGE_NAME=ghcr.io/${OWNER}/qbittorrent" >> "$GITHUB_ENV"
 
-          QBT_VERSION="${QBT_TAG#release-}"
-          LT_VERSION="${LT_TAG#v}"
+          echo "VERSION_TAG=5.3.0beta1-lt2.1.1" >> "$GITHUB_ENV"
 
-          LT_MAJOR="$(echo "${LT_VERSION}" | cut -d. -f1)"
-          LT_MINOR="$(echo "${LT_VERSION}" | cut -d. -f2)"
-          LT_SERIES="${LT_MAJOR}.${LT_MINOR}"
+      # ----------------------------------------------------------
+      # 1. 获取 qBittorrent 官方 Docker 构建项目
+      # ----------------------------------------------------------
+      - name: Clone official qBittorrent Docker repository
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # ----------------------------------------------------------
-          # Compatibility guard
-          #
-          # libtorrent 2.1 requires qBittorrent >= 5.3 source tree。
-          # 防止未来又错误组合成 5.2.x + 2.1.x。
-          # ----------------------------------------------------------
-          QBT_MAJOR="$(echo "${QBT_VERSION}" | sed -E 's/^([0-9]+).*/\1/')"
-          QBT_MINOR="$(echo "${QBT_VERSION}" | sed -E 's/^[0-9]+\.([0-9]+).*/\1/')"
+          git clone \
+            --depth 1 \
+            https://github.com/qbittorrent/docker-qbittorrent-nox.git \
+            qbt-docker
 
-          if [[ "${LT_MAJOR}" -eq 2 && "${LT_MINOR}" -ge 1 ]]; then
-            if [[ "${QBT_MAJOR}" -lt 5 ]] || \
-               { [[ "${QBT_MAJOR}" -eq 5 ]] && [[ "${QBT_MINOR}" -lt 3 ]]; }; then
-              echo "::error::Incompatible versions: qBittorrent ${QBT_VERSION} cannot be built with libtorrent ${LT_VERSION}"
-              echo "::error::libtorrent 2.1.x requires the qBittorrent 5.3.x source tree."
-              exit 1
-            fi
-          fi
-
-          OWNER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE_NAME="ghcr.io/${OWNER}/${IMAGE_BASENAME}"
-
-          {
-            echo "QBT_TAG=${QBT_TAG}"
-            echo "QBT_VERSION=${QBT_VERSION}"
-            echo "LT_TAG=${LT_TAG}"
-            echo "LT_VERSION=${LT_VERSION}"
-            echo "LT_SERIES=${LT_SERIES}"
-            echo "IMAGE_NAME=${IMAGE_NAME}"
-          } >> "${GITHUB_ENV}"
-
-          echo "================================================"
-          echo "qBittorrent tag : ${QBT_TAG}"
-          echo "qBittorrent     : ${QBT_VERSION}"
-          echo "libtorrent tag  : ${LT_TAG}"
-          echo "libtorrent      : ${LT_VERSION}"
-          echo "libtorrent line : ${LT_SERIES}"
-          echo "image           : ${IMAGE_NAME}"
-          echo "================================================"
-
-      # ------------------------------------------------------------
-      # 2. 下载 userdocs 的静态构建脚本
+      # ----------------------------------------------------------
+      # 2. 使用官方 Dockerfile 构建：
       #
-      # LinuxServer 目前也是使用这个项目生成的静态 binary。
-      # ------------------------------------------------------------
-      - name: Download qBittorrent static build system
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -fsSL \
-            https://raw.githubusercontent.com/userdocs/qbittorrent-nox-static/master/qbt-nox-static.bash \
-            -o qbt-nox-static.bash
-
-          chmod +x qbt-nox-static.bash
-
-      # ------------------------------------------------------------
-      # 3. 配置静态编译
-      # ------------------------------------------------------------
-      - name: Configure static build
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > env.custom <<EOF
-          qbt_revision_url=userdocs/qbittorrent-nox-static
-          qbt_zlib_type=zlib
-
-          qbt_skip_icu=no
-
-          qbt_libtorrent_version=${LT_SERIES}
-          qbt_libtorrent_tag=${LT_TAG}
-
-          qbt_qbittorrent_tag=${QBT_TAG}
-
-          qbt_qt_version=6
-          qbt_build_tool=cmake
-
-          qbt_build_dir=qbt-build
-          qbt_cross_name=x86_64
-
-          qbt_mcm_url=userdocs/musl-cross-make
-          qbt_patches_url=userdocs/qbittorrent-nox-static
-
-          qbt_workflow_files=no
-
-          qbt_linker_mold=yes
-          qbt_build_debug=no
-          qbt_optimise_strip=yes
-          EOF
-
-          cat env.custom
-
-      # ------------------------------------------------------------
-      # 4. 创建 Alpine 构建容器
+      # qBittorrent 5.3.0beta1
+      # libtorrent 2.1.1
       #
-      # 直接使用 userdocs CI 使用的 container helper。
-      # ------------------------------------------------------------
-      - name: Create qBittorrent build container
-        id: qbt_docker
-        uses: userdocs/actions/qbt_docker@v1.0.7
-        with:
-          os_id: alpine
-          os_version_id: edge
-          additional_apps: "curl git"
-
-      # ------------------------------------------------------------
-      # 5. 安装构建依赖 / toolchain
-      # ------------------------------------------------------------
-      - name: Bootstrap build dependencies
+      # 不使用 userdocs 静态构建系统。
+      # ----------------------------------------------------------
+      - name: Build official qbittorrent-nox
         shell: bash
         run: |
           set -euo pipefail
 
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash bootstrap_deps
+          docker build \
+            --pull \
+            --build-arg "QBT_VERSION=${QBT_VERSION}" \
+            --build-arg "BOOST_VERSION_MAJOR=${BOOST_VERSION_MAJOR}" \
+            --build-arg "BOOST_VERSION_MINOR=${BOOST_VERSION_MINOR}" \
+            --build-arg "BOOST_VERSION_PATCH=${BOOST_VERSION_PATCH}" \
+            --build-arg "LIBBT_VERSION=${LIBTORRENT_VERSION}" \
+            --build-arg "LIBBT_CMAKE_FLAGS=-Ddeprecated-functions=ON -Dwebtorrent=ON" \
+            --tag "local/qbittorrent-upstream:${VERSION_TAG}" \
+            ./qbt-docker
 
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash -bs-a
-
-      # ------------------------------------------------------------
-      # 6. 编译依赖
-      # ------------------------------------------------------------
-      - name: Build zlib
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash zlib
-
-      - name: Build ICU
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash icu
-
-      - name: Build OpenSSL
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash openssl
-
-      - name: Build Boost
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash boost
-
-      # ------------------------------------------------------------
-      # 7. 编译 latest libtorrent
-      # ------------------------------------------------------------
-      - name: Build libtorrent
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash libtorrent
-
-      # ------------------------------------------------------------
-      # 8. 编译 Qt6
-      # ------------------------------------------------------------
-      - name: Build Qt6
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash qtbase
-
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash qttools
-
-      # ------------------------------------------------------------
-      # 9. 编译 latest qbittorrent-nox
-      # ------------------------------------------------------------
-      - name: Build qBittorrent
-        run: |
-          docker exec "${container_name}" \
-            bash qbt-nox-static.bash qbittorrent
-
-      # ------------------------------------------------------------
-      # 10. 检查生成的 binary
-      # ------------------------------------------------------------
-      - name: Verify qbittorrent-nox
+      # ----------------------------------------------------------
+      # 3. 测试官方编译结果
+      # ----------------------------------------------------------
+      - name: Verify upstream build
         shell: bash
         run: |
           set -euo pipefail
 
-          BINARY="qbt-build/completed/qbittorrent-nox"
+          echo "===== qBittorrent ====="
 
-          test -s "${BINARY}"
-
-          chmod +x "${BINARY}"
-
-          echo "------ file ------"
-          file "${BINARY}"
+          docker run --rm \
+            --entrypoint /usr/bin/qbittorrent-nox \
+            "local/qbittorrent-upstream:${VERSION_TAG}" \
+            --version
 
           echo
-          echo "------ qBittorrent version ------"
-          "${BINARY}" --version
+          echo "===== upstream SBOM ====="
 
-          echo
-          echo "------ sha256 ------"
-          sha256sum "${BINARY}"
+          docker run --rm \
+            --entrypoint /bin/cat \
+            "local/qbittorrent-upstream:${VERSION_TAG}" \
+            /sbom.txt
 
-          echo
-          echo "------ build metadata ------"
-          find qbt-build \
-            -name 'dependency-version.json' \
-            -type f \
-            -print \
-            -exec cat {} \; \
-            || true
-
-      # ------------------------------------------------------------
-      # 11. 顺便上传静态 binary 到 Actions Artifacts
-      # ------------------------------------------------------------
-      - name: Upload qbittorrent-nox artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: qbittorrent-${{ env.QBT_VERSION }}-libtorrent-${{ env.LT_VERSION }}
-          path: qbt-build/completed/qbittorrent-nox
-          if-no-files-found: error
-
-      # ------------------------------------------------------------
-      # 12. 创建最终镜像 build context
-      #
-      # 核心就是：
-      #
-      # FROM lscr.io/linuxserver/qbittorrent:latest
-      #
-      # 然后直接覆盖：
-      # /app/qbittorrent-nox
-      # ------------------------------------------------------------
-      - name: Prepare LinuxServer image
+      # ----------------------------------------------------------
+      # 4. 从官方构建镜像提取 qbittorrent-nox
+      # ----------------------------------------------------------
+      - name: Extract qbittorrent-nox
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p image
+          mkdir -p final-image
 
-          cp \
-            qbt-build/completed/qbittorrent-nox \
-            image/qbittorrent-nox
+          CONTAINER_ID="$(
+            docker create \
+              "local/qbittorrent-upstream:${VERSION_TAG}"
+          )"
 
-          chmod 0755 image/qbittorrent-nox
+          docker cp \
+            "${CONTAINER_ID}:/usr/bin/qbittorrent-nox" \
+            final-image/qbittorrent-nox
 
-          cat > image/Dockerfile <<'EOF'
+          docker cp \
+            "${CONTAINER_ID}:/sbom.txt" \
+            final-image/qbt-upstream-sbom.txt
+
+          docker rm "${CONTAINER_ID}"
+
+          chmod 0755 final-image/qbittorrent-nox
+
+          ls -lh final-image
+
+      # ----------------------------------------------------------
+      # 5. 生成最终 LinuxServer Dockerfile
+      #
+      # LinuxServer 所有原有机制全部保留：
+      #
+      # /config
+      # PUID / PGID
+      # WEBUI_PORT
+      # TORRENTING_PORT
+      # s6
+      #
+      # 只换 qbittorrent-nox。
+      # ----------------------------------------------------------
+      - name: Generate LinuxServer Dockerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > final-image/Dockerfile <<'EOF'
           FROM lscr.io/linuxserver/qbittorrent:latest
 
-          ARG QBT_VERSION
-          ARG LT_VERSION
+          # qBittorrent 官方 binary 不是 LinuxServer 原来那种
+          # 完全静态的 userdocs binary，因此补齐运行时库。
+          RUN apk add --no-cache \
+              libcrypto3 \
+              libssl3 \
+              qt6-qtbase \
+              qt6-qtbase-sqlite \
+              zlib
 
-          USER root
+          COPY --chmod=0755 \
+              qbittorrent-nox \
+              /app/qbittorrent-nox
 
-          # 先放到临时位置
-          COPY qbittorrent-nox /tmp/qbittorrent-nox
+          COPY \
+              qbt-upstream-sbom.txt \
+              /qbt-upstream-sbom.txt
 
-          # 用编译的 binary 替换 LinuxServer 自带版本
+          # 构建阶段直接验证程序和动态库。
           RUN set -eux; \
-              chmod 0755 /tmp/qbittorrent-nox; \
-              /tmp/qbittorrent-nox --version; \
-              rm -f /app/qbittorrent-nox; \
-              mv /tmp/qbittorrent-nox /app/qbittorrent-nox; \
-              chmod 0755 /app/qbittorrent-nox
-
-          LABEL org.opencontainers.image.title="LinuxServer qBittorrent with custom libtorrent"
-          LABEL io.github.custom.qbittorrent.version="${QBT_VERSION}"
-          LABEL io.github.custom.libtorrent.version="${LT_VERSION}"
+              /app/qbittorrent-nox --version; \
+              ldd /app/qbittorrent-nox | tee /tmp/qbt-ldd.txt; \
+              ! grep -q "not found" /tmp/qbt-ldd.txt
           EOF
 
-          echo "------ Dockerfile ------"
-          cat image/Dockerfile
+          echo "================ Dockerfile ================"
+          cat final-image/Dockerfile
+          echo "============================================"
 
-      # ------------------------------------------------------------
-      # 13. 登录 GHCR
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
+      # 6. 登录 GitHub Container Registry
+      # ----------------------------------------------------------
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -366,79 +180,72 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # ------------------------------------------------------------
-      # 14. 基于 LinuxServer latest 构建 + 推送
-      #
-      # 输出：
-      #
-      # ghcr.io/user/qbittorrent:latest
-      #
-      # ghcr.io/user/qbittorrent:qbt-5.2.3-lt-2.1.1
-      # ------------------------------------------------------------
-      - name: Build and push final image
+      # ----------------------------------------------------------
+      # 7. 构建最终 LinuxServer 镜像
+      # ----------------------------------------------------------
+      - name: Build final LinuxServer image
         shell: bash
-        working-directory: image
         run: |
           set -euo pipefail
 
-          VERSION_TAG="qbt-${QBT_VERSION}-lt-${LT_VERSION}"
-
-          docker buildx build \
-            --platform linux/amd64 \
+          docker build \
             --pull \
-            --push \
-            --provenance=true \
-            --build-arg "QBT_VERSION=${QBT_VERSION}" \
-            --build-arg "LT_VERSION=${LT_VERSION}" \
-            --tag "${IMAGE_NAME}:latest" \
             --tag "${IMAGE_NAME}:${VERSION_TAG}" \
-            .
+            --tag "${IMAGE_NAME}:latest" \
+            ./final-image
 
-          echo "IMAGE_VERSION_TAG=${VERSION_TAG}" >> "${GITHUB_ENV}"
-
-      # ------------------------------------------------------------
-      # 15. 拉回镜像验证，确保 LinuxServer 内部 binary 已成功替换
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
+      # 8. 最终运行验证
+      # ----------------------------------------------------------
       - name: Verify final image
         shell: bash
         run: |
           set -euo pipefail
 
-          docker pull "${IMAGE_NAME}:${IMAGE_VERSION_TAG}"
-
-          echo "------ final container qBittorrent ------"
+          echo "===== final qBittorrent ====="
 
           docker run --rm \
             --entrypoint /app/qbittorrent-nox \
-            "${IMAGE_NAME}:${IMAGE_VERSION_TAG}" \
+            "${IMAGE_NAME}:${VERSION_TAG}" \
             --version
 
           echo
-          echo "Published:"
-          echo "${IMAGE_NAME}:latest"
-          echo "${IMAGE_NAME}:${IMAGE_VERSION_TAG}"
+          echo "===== compile-time SBOM ====="
 
-      # ------------------------------------------------------------
-      # 16. Actions 页面显示摘要
-      # ------------------------------------------------------------
-      - name: Summary
+          docker run --rm \
+            --entrypoint /bin/cat \
+            "${IMAGE_NAME}:${VERSION_TAG}" \
+            /qbt-upstream-sbom.txt
+
+      # ----------------------------------------------------------
+      # 9. 上传 GHCR
+      # ----------------------------------------------------------
+      - name: Push image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker push "${IMAGE_NAME}:${VERSION_TAG}"
+          docker push "${IMAGE_NAME}:latest"
+
+      # ----------------------------------------------------------
+      # 10. Summary
+      # ----------------------------------------------------------
+      - name: Job summary
         shell: bash
         run: |
           {
-            echo "## qBittorrent custom image"
+            echo "## qBittorrent custom LinuxServer image"
             echo
             echo "| Component | Version |"
             echo "|---|---|"
-            echo "| qBittorrent | \`${QBT_VERSION}\` |"
-            echo "| libtorrent | \`${LT_VERSION}\` |"
-            echo "| Base image | \`lscr.io/linuxserver/qbittorrent:latest\` |"
+            echo "| qBittorrent | ${QBT_VERSION} |"
+            echo "| libtorrent | ${LIBTORRENT_VERSION#v} |"
+            echo "| Base | lscr.io/linuxserver/qbittorrent:latest |"
             echo
-            echo "### Images"
+            echo "### Published images"
+            echo
+            echo "\`${IMAGE_NAME}:${VERSION_TAG}\`"
             echo
             echo "\`${IMAGE_NAME}:latest\`"
-            echo
-            echo "\`${IMAGE_NAME}:${IMAGE_VERSION_TAG}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } >> "$GITHUB_STEP_SUMMARY"
