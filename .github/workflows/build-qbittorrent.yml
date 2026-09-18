@@ -14,8 +14,8 @@ on:
         type: string
 
   # 每周自动检查一次新版本
-  schedule:
-    - cron: "0 0 * * 1"
+  #schedule:
+  #  - cron: "0 0 * * 1"
 
 permissions:
   contents: read
@@ -37,7 +37,7 @@ jobs:
       # ------------------------------------------------------------
       # 1. 获取 qBittorrent / libtorrent 最新稳定版
       # ------------------------------------------------------------
-      - name: Resolve latest versions
+      - name: Resolve latest compatible versions
         env:
           GH_TOKEN: ${{ github.token }}
           QBT_INPUT: ${{ inputs.qbittorrent_tag }}
@@ -46,6 +46,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ----------------------------------------------------------
+          # qBittorrent
+          #
+          # 注意：
+          # /releases/latest 会忽略 prerelease。
+          #
+          # 目前 libtorrent 2.1.x 需要 qBittorrent 5.3.x，
+          # 而当前最新的是 5.3.0beta1，所以这里直接从 releases
+          # 列表取最新的非 draft release，包括 beta/RC。
+          # ----------------------------------------------------------
           if [[ -n "${QBT_INPUT:-}" ]]; then
             QBT_TAG="${QBT_INPUT}"
           else
@@ -53,11 +63,17 @@ jobs:
               curl -fsSL \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/qbittorrent/qBittorrent/releases/latest \
-              | jq -r '.tag_name'
+                "https://api.github.com/repos/qbittorrent/qBittorrent/releases?per_page=20" \
+              | jq -r '[.[] | select(.draft == false)][0].tag_name'
             )"
           fi
 
+          # ----------------------------------------------------------
+          # libtorrent
+          #
+          # libtorrent 这里需要最新正式稳定 release。
+          # 当前为 v2.1.1。
+          # ----------------------------------------------------------
           if [[ -n "${LT_INPUT:-}" ]]; then
             LT_TAG="${LT_INPUT}"
           else
@@ -65,7 +81,7 @@ jobs:
               curl -fsSL \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/arvidn/libtorrent/releases/latest \
+                "https://api.github.com/repos/arvidn/libtorrent/releases/latest" \
               | jq -r '.tag_name'
             )"
           fi
@@ -73,20 +89,39 @@ jobs:
           QBT_VERSION="${QBT_TAG#release-}"
           LT_VERSION="${LT_TAG#v}"
 
-          # v2.1.1 -> 2.1
-          LT_SERIES="$(printf '%s' "${LT_VERSION}" | awk -F. '{print $1"."$2}')"
+          LT_MAJOR="$(echo "${LT_VERSION}" | cut -d. -f1)"
+          LT_MINOR="$(echo "${LT_VERSION}" | cut -d. -f2)"
+          LT_SERIES="${LT_MAJOR}.${LT_MINOR}"
+
+          # ----------------------------------------------------------
+          # Compatibility guard
+          #
+          # libtorrent 2.1 requires qBittorrent >= 5.3 source tree。
+          # 防止未来又错误组合成 5.2.x + 2.1.x。
+          # ----------------------------------------------------------
+          QBT_MAJOR="$(echo "${QBT_VERSION}" | sed -E 's/^([0-9]+).*/\1/')"
+          QBT_MINOR="$(echo "${QBT_VERSION}" | sed -E 's/^[0-9]+\.([0-9]+).*/\1/')"
+
+          if [[ "${LT_MAJOR}" -eq 2 && "${LT_MINOR}" -ge 1 ]]; then
+            if [[ "${QBT_MAJOR}" -lt 5 ]] || \
+               { [[ "${QBT_MAJOR}" -eq 5 ]] && [[ "${QBT_MINOR}" -lt 3 ]]; }; then
+              echo "::error::Incompatible versions: qBittorrent ${QBT_VERSION} cannot be built with libtorrent ${LT_VERSION}"
+              echo "::error::libtorrent 2.1.x requires the qBittorrent 5.3.x source tree."
+              exit 1
+            fi
+          fi
 
           OWNER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           IMAGE_NAME="ghcr.io/${OWNER}/${IMAGE_BASENAME}"
 
-          echo "QBT_TAG=${QBT_TAG}" >> "${GITHUB_ENV}"
-          echo "QBT_VERSION=${QBT_VERSION}" >> "${GITHUB_ENV}"
-
-          echo "LT_TAG=${LT_TAG}" >> "${GITHUB_ENV}"
-          echo "LT_VERSION=${LT_VERSION}" >> "${GITHUB_ENV}"
-          echo "LT_SERIES=${LT_SERIES}" >> "${GITHUB_ENV}"
-
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> "${GITHUB_ENV}"
+          {
+            echo "QBT_TAG=${QBT_TAG}"
+            echo "QBT_VERSION=${QBT_VERSION}"
+            echo "LT_TAG=${LT_TAG}"
+            echo "LT_VERSION=${LT_VERSION}"
+            echo "LT_SERIES=${LT_SERIES}"
+            echo "IMAGE_NAME=${IMAGE_NAME}"
+          } >> "${GITHUB_ENV}"
 
           echo "================================================"
           echo "qBittorrent tag : ${QBT_TAG}"
@@ -115,10 +150,6 @@ jobs:
 
       # ------------------------------------------------------------
       # 3. 配置静态编译
-      #
-      # 重点：
-      # qbt_qbittorrent_tag = latest qB release
-      # qbt_libtorrent_tag  = latest libtorrent release
       # ------------------------------------------------------------
       - name: Configure static build
         shell: bash
@@ -140,22 +171,19 @@ jobs:
           qbt_build_tool=cmake
 
           qbt_build_dir=qbt-build
-
           qbt_cross_name=x86_64
 
           qbt_mcm_url=userdocs/musl-cross-make
           qbt_patches_url=userdocs/qbittorrent-nox-static
 
-          qbt_workflow_files=yes
+          qbt_workflow_files=no
 
           qbt_linker_mold=yes
           qbt_build_debug=no
           qbt_optimise_strip=yes
           EOF
 
-          echo "------ env.custom ------"
           cat env.custom
-          echo "------------------------"
 
       # ------------------------------------------------------------
       # 4. 创建 Alpine 构建容器
