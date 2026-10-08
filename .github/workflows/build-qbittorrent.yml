@@ -8,8 +8,8 @@ permissions:
   packages: write
 
 env:
-  QBT_VERSION: "5.3.0beta1"
-  LIBTORRENT_VERSION: "v2.1.1"
+  QBT_VERSION: "5.3.0rc1"
+  LIBTORRENT_VERSION: "v2.1.2"
 
   BOOST_VERSION_MAJOR: "1"
   BOOST_VERSION_MINOR: "92"
