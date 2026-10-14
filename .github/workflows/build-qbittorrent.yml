@@ -30,7 +30,7 @@ jobs:
 
           echo "IMAGE_NAME=ghcr.io/${OWNER}/qbittorrent" >> "$GITHUB_ENV"
 
-          echo "VERSION_TAG=5.3.0beta1-lt2.1.1" >> "$GITHUB_ENV"
+          echo "VERSION_TAG=5.3.0rc1-lt2.1.2" >> "$GITHUB_ENV"
 
       # ----------------------------------------------------------
       # 1. 获取 qBittorrent 官方 Docker 构建项目
@@ -48,8 +48,8 @@ jobs:
       # ----------------------------------------------------------
       # 2. 使用官方 Dockerfile 构建：
       #
-      # qBittorrent 5.3.0beta1
-      # libtorrent 2.1.1
+      # qBittorrent 5.3.0rc1
+      # libtorrent 2.1.2
       #
       # 不使用 userdocs 静态构建系统。
       # ----------------------------------------------------------
